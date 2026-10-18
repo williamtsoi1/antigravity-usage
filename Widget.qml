@@ -35,6 +35,16 @@ BarWidget {
   readonly property string activeStatus: provider ? provider.activeStatus : "Idle"
   readonly property bool isWorking: provider && provider.activeStatus === "Working"
   readonly property bool isWaiting: provider && (provider.activeStatus === "Waiting" || (provider.hasActiveSession && !isWorking))
+  readonly property string usageMode: (root.settings && root.settings.usageMode === "tokens") ? "tokens" : "prompts"
+  readonly property bool isTokenMode: root.usageMode === "tokens"
+
+  function formatTokens(n) {
+    var val = Math.max(0, Number(n || 0))
+    if (val >= 1000000000) return (val / 1000000000).toFixed(2).replace(/\.00$/, "") + "B"
+    if (val >= 1000000) return (val / 1000000).toFixed(2).replace(/\.00$/, "") + "M"
+    if (val >= 1000) return (val / 1000).toFixed(1).replace(/\.0$/, "") + "k"
+    return String(Math.round(val))
+  }
 
   function close() {
     popupOpen = false
@@ -167,6 +177,7 @@ BarWidget {
 
   function defaultSettings() {
     return {
+      usageMode: "prompts",
       refreshIntervalSec: 60,
       badgeMode: "active",
       showBadge: true,
@@ -179,12 +190,15 @@ BarWidget {
 
   function normalizedSettings(source) {
     var next = cloneObject(source, {}) || {}
+    var um = (next.usageMode !== undefined && next.usageMode !== null) ? String(next.usageMode).toLowerCase().trim() : "prompts"
+    next.usageMode = (um === "tokens") ? "tokens" : "prompts"
+
     var refresh = Number(next.refreshIntervalSec === undefined || next.refreshIntervalSec === null ? 60 : next.refreshIntervalSec)
     next.refreshIntervalSec = Math.round(clamp(isFinite(refresh) ? refresh : 60, 10, 1800))
 
     if (next.badgeMode !== undefined && next.badgeMode !== null) {
       var bm = String(next.badgeMode).toLowerCase().trim()
-      if (bm !== "active" && bm !== "prompts" && bm !== "off") bm = "active"
+      if (bm !== "active" && bm !== "prompts" && bm !== "tokens" && bm !== "off") bm = "active"
       next.badgeMode = bm
       next.showBadge = bm !== "off"
     } else {
@@ -202,6 +216,23 @@ BarWidget {
     next.recentSessionsLimit = Math.round(clamp(isFinite(limit) ? limit : 5, 3, 10))
 
     return next
+  }
+
+  function setUsageMode(mode) {
+    var m = (mode === "tokens") ? "tokens" : "prompts"
+    var next = normalizedSettings(root.settings)
+    next.usageMode = m
+    root.settings = next
+    if (root.settingsMode) {
+      draftSettings = normalizedSettings(next)
+    }
+    if (canPersistSettings()) {
+      bar.shell.updateEntryInline(root.moduleName, next)
+    }
+  }
+
+  function toggleUsageMode() {
+    setUsageMode(root.isTokenMode ? "prompts" : "tokens")
   }
 
   function openSettings() {
@@ -284,7 +315,7 @@ BarWidget {
     next[name] = value
     if (name === "badgeMode") {
       var bm = String(value).toLowerCase().trim()
-      if (bm !== "active" && bm !== "prompts" && bm !== "off") bm = "active"
+      if (bm !== "active" && bm !== "prompts" && bm !== "tokens" && bm !== "off") bm = "active"
       next.badgeMode = bm
       next.showBadge = bm !== "off"
     } else if (name === "showBadge") {
@@ -329,6 +360,9 @@ BarWidget {
     if (!provider) return "Antigravity Usage"
     var count = provider.activeSessions ? provider.activeSessions.length : (provider.hasActiveSession ? 1 : 0)
     var status = provider.hasActiveSession ? " (" + count + " " + (count === 1 ? "session" : "sessions") + " " + provider.activeStatus.toLowerCase() + ")" : " (Idle)"
+    if (root.isTokenMode) {
+      return "Antigravity" + status + "\n" + root.formatTokens(provider.todayTotalTokens || 0) + " tokens today • " + (provider.currentModel || "Gemini")
+    }
     return "Antigravity" + status + "\n" + (provider.todayPrompts || 0) + " prompts today • " + (provider.currentModel || "Gemini")
   }
 
@@ -380,7 +414,8 @@ BarWidget {
       else { root.showUsage(); root.popupOpen = true }
       return "ok"
     }
-    function refresh(): string { root.triggerRefresh(); return "ok" }
+    function toggleMode(): string { root.toggleUsageMode(); return root.usageMode }
+    function refresh(): string { root.triggerRefresh(true); return "ok" }
     function settings(): string { root.openSettings(); return "ok" }
     function openSettings(): string { root.openSettings(); return "ok" }
     function setBadgeMode(mode: string): string { root.updateSetting("badgeMode", mode); return "ok" }
@@ -404,10 +439,12 @@ BarWidget {
       return provider.hasActiveSession ? 1 : 0
     }
     readonly property int promptCount: provider ? (provider.todayPrompts || 0) : 0
-    readonly property int badgeCount: badgeMode === "prompts" ? promptCount : (badgeMode === "active" ? activeCount : 0)
+    readonly property double tokenCount: provider ? (provider.todayTotalTokens || 0) : 0
+    readonly property double badgeCount: badgeMode === "tokens" ? tokenCount : (badgeMode === "prompts" ? promptCount : (badgeMode === "active" ? activeCount : 0))
+    readonly property string badgeDisplay: badgeMode === "tokens" ? root.formatTokens(tokenCount) : String(Math.round(badgeCount))
     readonly property bool hasBadge: {
       if (badgeMode === "off") return false
-      if (badgeMode === "prompts") return true
+      if (badgeMode === "prompts" || badgeMode === "tokens") return true
       if (badgeMode === "active") return activeCount > 0
       return false
     }
@@ -468,7 +505,7 @@ BarWidget {
         id: badgeText
         visible: chip.hasBadge
         textFormat: Text.PlainText
-        text: String(chip.badgeCount)
+        text: chip.badgeDisplay
         color: root.isWorking ? "#10B981" : (root.isWaiting ? "#3B82F6" : root.dim)
         font.family: root.fontFamily
         font.pixelSize: 9
@@ -529,9 +566,25 @@ BarWidget {
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(390))
     contentHeight: {
-      var headerH = (root.settingsMode ? settingsHeader.implicitHeight : statsHeader.implicitHeight) + panelSeparator.implicitHeight + 16
-      var needed = headerH + contentColumn.implicitHeight + Style.space(12)
-      return panel.fittedContentHeight(needed, Style.space(640))
+      var headerH = (root.settingsMode ? settingsHeader.implicitHeight : statsHeader.implicitHeight) + panelSeparator.implicitHeight + (panelMainColumn.spacing * 2)
+      if (root.settingsMode || !root.provider || !root.provider.hasLocalStats) {
+        var fallbackNeeded = headerH + contentColumn.implicitHeight + Style.space(12)
+        return panel.fittedContentHeight(fallbackNeeded, Style.space(640))
+      }
+      var topCards = [metricToggleBar, statusCard, todayCard, quotaLimitsCard, modelUsageCard]
+      var topCardsH = 0
+      var visibleCount = 0
+      for (var i = 0; i < topCards.length; i++) {
+        var c = topCards[i]
+        if (c && c.visible && c.implicitHeight > 0) {
+          topCardsH += c.implicitHeight
+          visibleCount += 1
+        }
+      }
+      if (visibleCount > 1) {
+        topCardsH += (visibleCount - 1) * contentColumn.spacing
+      }
+      return panel.fittedContentHeight(headerH + topCardsH)
     }
 
     PanelKeyCatcher {
@@ -545,6 +598,7 @@ BarWidget {
       onCloseRequested: root.close()
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.triggerRefresh(true)
+        else if (t === "t" || t === "T") { if (!root.settingsMode) root.toggleUsageMode() }
         else if (t === "s" || t === "S") root.settingsMode ? root.saveSettings() : root.openSettings()
         else if (t === "n" || t === "N") { if (!root.settingsMode) root.newSession() }
         else if (t === "q" || t === "Q") root.close()
@@ -638,10 +692,26 @@ BarWidget {
               horizontalAlignment: Text.AlignHCenter
             }
 
-            StatusCard { provider: root.settingsMode ? null : root.provider }
-            TodayCard { provider: root.settingsMode ? null : root.provider }
-            QuotaLimitsCard { provider: root.settingsMode ? null : root.provider }
-            ModelUsageCard { provider: root.settingsMode ? null : root.provider }
+            MetricToggleBar {
+              id: metricToggleBar
+              visible: !root.settingsMode && !!root.provider && root.provider.hasLocalStats
+            }
+            StatusCard {
+              id: statusCard
+              provider: root.settingsMode ? null : root.provider
+            }
+            TodayCard {
+              id: todayCard
+              provider: root.settingsMode ? null : root.provider
+            }
+            QuotaLimitsCard {
+              id: quotaLimitsCard
+              provider: root.settingsMode ? null : root.provider
+            }
+            ModelUsageCard {
+              id: modelUsageCard
+              provider: root.settingsMode ? null : root.provider
+            }
             WeekCard { provider: root.settingsMode ? null : root.provider }
             ToolsCard { provider: root.settingsMode ? null : root.provider }
             RecentSessionsCard { provider: root.settingsMode ? null : root.provider }
@@ -660,6 +730,57 @@ BarWidget {
   }
 
   // --------------------------------------------------------- Components
+  component MetricToggleBar: Rectangle {
+    Layout.fillWidth: true
+    implicitHeight: 24
+    radius: 5
+    color: root.track
+    border.color: root.outline
+    border.width: 1
+
+    RowLayout {
+      anchors.fill: parent
+      anchors.margins: 2
+      spacing: 2
+
+      Repeater {
+        model: [
+          { key: "prompts", label: "Prompts & Steps" },
+          { key: "tokens", label: "Tokens" }
+        ]
+
+        delegate: Rectangle {
+          required property var modelData
+          readonly property bool isSelected: root.usageMode === modelData.key
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          radius: 3
+          color: isSelected ? root.accent : (topMetricMouse.containsMouse ? root.cardHover : "transparent")
+
+          Behavior on color { ColorAnimation { duration: 100 } }
+
+          Text {
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: modelData.label
+            color: isSelected ? "#FFFFFF" : (topMetricMouse.containsMouse ? root.foreground : root.dim)
+            font.family: root.fontFamily
+            font.pixelSize: 10
+            font.bold: isSelected
+          }
+
+          MouseArea {
+            id: topMetricMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.setUsageMode(modelData.key)
+          }
+        }
+      }
+    }
+  }
+
   component Header: RowLayout {
     property var provider: null
     visible: !!provider
@@ -991,27 +1112,52 @@ BarWidget {
     visible: !!provider && provider.ready && provider.hasLocalStats
     title: "Today & Totals"
 
-    RowLayout {
+    ColumnLayout {
       width: parent.width
-      spacing: Style.space(8)
+      spacing: 6
 
-      StatBlock {
+      RowLayout {
         Layout.fillWidth: true
-        Layout.preferredWidth: 1
-        value: provider ? String(provider.todayPrompts || 0) : "0"
-        label: "prompts today"
+        spacing: Style.space(8)
+
+        StatBlock {
+          Layout.fillWidth: true
+          Layout.preferredWidth: 1
+          value: provider
+            ? (root.isTokenMode ? root.formatTokens(provider.todayTotalTokens || 0) : String(provider.todayPrompts || 0))
+            : "0"
+          label: root.isTokenMode ? "tokens today" : "prompts today"
+        }
+        StatBlock {
+          Layout.fillWidth: true
+          Layout.preferredWidth: 1
+          value: provider
+            ? (root.isTokenMode ? root.formatTokens(provider.weekTotalTokens || 0) : String(provider.todaySteps || 0))
+            : "0"
+          label: root.isTokenMode ? "7-day tokens" : "steps today"
+        }
+        StatBlock {
+          Layout.fillWidth: true
+          Layout.preferredWidth: 1
+          value: provider
+            ? (root.isTokenMode ? root.formatTokens(provider.totalTokens || 0) : String(provider.totalPrompts || 0))
+            : "0"
+          label: root.isTokenMode ? "total tokens" : "total prompts"
+        }
       }
-      StatBlock {
-        Layout.fillWidth: true
-        Layout.preferredWidth: 1
-        value: provider ? String(provider.todaySteps || 0) : "0"
-        label: "steps today"
-      }
-      StatBlock {
-        Layout.fillWidth: true
-        Layout.preferredWidth: 1
-        value: provider ? String(provider.totalPrompts || 0) : "0"
-        label: "total prompts"
+
+      Text {
+        visible: root.isTokenMode && !!provider && (provider.todayTotalTokens || 0) > 0
+        textFormat: Text.PlainText
+        text: provider
+          ? ("Today: In " + root.formatTokens(provider.todayInputTokens || 0)
+             + " · Out " + root.formatTokens(provider.todayOutputTokens || 0)
+             + ((provider.todayCacheReadTokens || 0) > 0 ? (" · Cache " + root.formatTokens(provider.todayCacheReadTokens || 0)) : ""))
+          : ""
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: 9
+        Layout.alignment: Qt.AlignHCenter
       }
     }
   }
@@ -1237,6 +1383,34 @@ BarWidget {
       return Number(m.steps || 0)
     }
 
+    function getTokens(m, range) {
+      if (!m) return 0
+      if (range === "today") return Number(m.todayTokens || 0)
+      if (range === "week") return Number(m.weekTokens || 0)
+      return Number(m.totalTokens || 0)
+    }
+
+    function getInputTokens(m, range) {
+      if (!m) return 0
+      if (range === "today") return Number(m.todayInputTokens || 0)
+      if (range === "week") return Number(m.weekInputTokens || 0)
+      return Number(m.inputTokens || 0)
+    }
+
+    function getOutputTokens(m, range) {
+      if (!m) return 0
+      if (range === "today") return Number(m.todayOutputTokens || 0)
+      if (range === "week") return Number(m.weekOutputTokens || 0)
+      return Number(m.outputTokens || 0)
+    }
+
+    function getCacheTokens(m, range) {
+      if (!m) return 0
+      if (range === "today") return Number(m.todayCacheReadTokens || 0)
+      if (range === "week") return Number(m.weekCacheReadTokens || 0)
+      return Number(m.cacheReadTokens || 0)
+    }
+
     readonly property real totalPromptsForRange: {
       var list = rawModelList
       var sum = 0
@@ -1255,9 +1429,54 @@ BarWidget {
       return sum
     }
 
+    readonly property double totalTokensForRange: {
+      var list = rawModelList
+      var sum = 0
+      for (var i = 0; i < list.length; i++) {
+        sum += getTokens(list[i], timeRange)
+      }
+      return sum
+    }
+
+    readonly property double totalInputTokensForRange: {
+      var list = rawModelList
+      var sum = 0
+      for (var i = 0; i < list.length; i++) {
+        sum += getInputTokens(list[i], timeRange)
+      }
+      return sum
+    }
+
+    readonly property double totalOutputTokensForRange: {
+      var list = rawModelList
+      var sum = 0
+      for (var i = 0; i < list.length; i++) {
+        sum += getOutputTokens(list[i], timeRange)
+      }
+      return sum
+    }
+
+    readonly property double totalCacheTokensForRange: {
+      var list = rawModelList
+      var sum = 0
+      for (var i = 0; i < list.length; i++) {
+        sum += getCacheTokens(list[i], timeRange)
+      }
+      return sum
+    }
+
     readonly property var displayModelList: {
       var list = rawModelList.slice()
+      var tokenMode = root.isTokenMode
       list.sort(function(a, b) {
+        if (tokenMode) {
+          var aT = getTokens(a, timeRange)
+          var bT = getTokens(b, timeRange)
+          if (bT !== aT) return bT - aT
+          var aAllT = Number(a.totalTokens || 0)
+          var bAllT = Number(b.totalTokens || 0)
+          if (bAllT !== aAllT) return bAllT - aAllT
+        }
         var aP = getPrompts(a, timeRange)
         var bP = getPrompts(b, timeRange)
         var aS = getSteps(a, timeRange)
@@ -1275,11 +1494,17 @@ BarWidget {
       spacing: 6
 
       Text {
-        visible: modelCardRoot.totalPromptsForRange === 0 && modelCardRoot.totalStepsForRange === 0
+        visible: root.isTokenMode
+          ? (modelCardRoot.totalTokensForRange === 0)
+          : (modelCardRoot.totalPromptsForRange === 0 && modelCardRoot.totalStepsForRange === 0)
         textFormat: Text.PlainText
-        text: modelCardRoot.timeRange === "today"
-          ? "No prompts recorded yet today"
-          : (modelCardRoot.timeRange === "week" ? "No prompts recorded in the last 7 days" : "No model activity recorded")
+        text: root.isTokenMode
+          ? (modelCardRoot.timeRange === "today"
+              ? "No tokens recorded yet today"
+              : (modelCardRoot.timeRange === "week" ? "No tokens recorded in the last 7 days" : "No token activity recorded"))
+          : (modelCardRoot.timeRange === "today"
+              ? "No prompts recorded yet today"
+              : (modelCardRoot.timeRange === "week" ? "No prompts recorded in the last 7 days" : "No model activity recorded"))
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: 9
@@ -1297,9 +1522,18 @@ BarWidget {
 
           readonly property int pCount: modelCardRoot.getPrompts(modelData, modelCardRoot.timeRange)
           readonly property int sCount: modelCardRoot.getSteps(modelData, modelCardRoot.timeRange)
-          readonly property real shareFrac: modelCardRoot.totalPromptsForRange > 0
+          readonly property double tCount: modelCardRoot.getTokens(modelData, modelCardRoot.timeRange)
+          readonly property double inCount: modelCardRoot.getInputTokens(modelData, modelCardRoot.timeRange)
+          readonly property double outCount: modelCardRoot.getOutputTokens(modelData, modelCardRoot.timeRange)
+          readonly property double cacheCount: modelCardRoot.getCacheTokens(modelData, modelCardRoot.timeRange)
+
+          readonly property real promptShareFrac: modelCardRoot.totalPromptsForRange > 0
             ? (pCount / modelCardRoot.totalPromptsForRange)
             : (modelCardRoot.totalStepsForRange > 0 ? (sCount / modelCardRoot.totalStepsForRange) : 0)
+          readonly property real tokenShareFrac: modelCardRoot.totalTokensForRange > 0
+            ? (tCount / modelCardRoot.totalTokensForRange)
+            : 0
+          readonly property real shareFrac: root.isTokenMode ? tokenShareFrac : promptShareFrac
           readonly property real sharePct: Math.round(shareFrac * 100)
 
           RowLayout {
@@ -1320,6 +1554,9 @@ BarWidget {
             Text {
               textFormat: Text.PlainText
               text: {
+                if (root.isTokenMode) {
+                  return root.formatTokens(tCount) + " tokens"
+                }
                 var p = pCount
                 var s = sCount
                 var sFmt = s >= 1000 ? (s / 1000).toFixed(1) + "k" : String(s)
@@ -1332,8 +1569,10 @@ BarWidget {
 
             Text {
               textFormat: Text.PlainText
-              text: (modelCardRoot.totalPromptsForRange > 0 || modelCardRoot.totalStepsForRange > 0) ? (sharePct + "%") : "0%"
-              color: pCount > 0 ? root.foreground : root.dim
+              text: root.isTokenMode
+                ? (modelCardRoot.totalTokensForRange > 0 ? (sharePct + "%") : "0%")
+                : ((modelCardRoot.totalPromptsForRange > 0 || modelCardRoot.totalStepsForRange > 0) ? (sharePct + "%") : "0%")
+              color: (root.isTokenMode ? (tCount > 0) : (pCount > 0)) ? root.foreground : root.dim
               font.family: root.fontFamily
               font.pixelSize: 9
               font.bold: true
@@ -1357,6 +1596,61 @@ BarWidget {
               Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
             }
           }
+
+          Text {
+            visible: root.isTokenMode && tCount > 0
+            textFormat: Text.PlainText
+            text: "In: " + root.formatTokens(inCount) + " · Out: " + root.formatTokens(outCount) + (cacheCount > 0 ? (" · Cache: " + root.formatTokens(cacheCount)) : "")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: 8
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+          }
+        }
+      }
+
+      PanelSeparator {
+        visible: root.isTokenMode && modelCardRoot.totalTokensForRange > 0
+        Layout.fillWidth: true
+        foreground: root.foreground
+        strength: 0.12
+      }
+
+      RowLayout {
+        visible: root.isTokenMode && modelCardRoot.totalTokensForRange > 0
+        Layout.fillWidth: true
+        spacing: 6
+
+        Text {
+          textFormat: Text.PlainText
+          text: modelCardRoot.timeRange === "today" ? "Today Total" : (modelCardRoot.timeRange === "week" ? "7-Day Total" : "All-Time Total")
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: 9
+          font.bold: true
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: "In " + root.formatTokens(modelCardRoot.totalInputTokensForRange)
+            + " · Out " + root.formatTokens(modelCardRoot.totalOutputTokensForRange)
+            + (modelCardRoot.totalCacheTokensForRange > 0 ? (" · Cache " + root.formatTokens(modelCardRoot.totalCacheTokensForRange)) : "")
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: 8
+          elide: Text.ElideRight
+          Layout.fillWidth: true
+          horizontalAlignment: Text.AlignRight
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: root.formatTokens(modelCardRoot.totalTokensForRange) + " tokens"
+          color: root.accent
+          font.family: root.fontFamily
+          font.pixelSize: 9
+          font.bold: true
         }
       }
     }
@@ -1366,14 +1660,17 @@ BarWidget {
     id: weekCardRoot
     property var provider: null
     visible: !!provider && provider.recentDays && provider.recentDays.length > 0
-               && provider.recentDays.some(function(d) { return d.messageCount > 0 })
+               && provider.recentDays.some(function(d) { return (d.messageCount > 0) || (d.tokens > 0) })
     title: "Last 7 Days Activity"
 
-    readonly property real maxCount: {
+    readonly property double maxCount: {
       var days = provider ? (provider.recentDays || []) : []
+      var tokenMode = root.isTokenMode
       var m = 1
       for (var i = 0; i < days.length; i++) {
-        var val = Number(days[i].messageCount || days[i].prompts || 0)
+        var val = tokenMode
+          ? Number(days[i].tokens || 0)
+          : Number(days[i].messageCount || days[i].prompts || 0)
         if (val > m) m = val
       }
       return m
@@ -1389,7 +1686,11 @@ BarWidget {
           required property var modelData
           Layout.fillWidth: true
           spacing: 6
-          readonly property real count: modelData ? Number(modelData.messageCount || modelData.prompts || 0) : 0
+          readonly property double count: modelData
+            ? (root.isTokenMode
+                ? Number(modelData.tokens || 0)
+                : Number(modelData.messageCount || modelData.prompts || 0))
+            : 0
 
           Text {
             textFormat: Text.PlainText
@@ -1417,7 +1718,7 @@ BarWidget {
               anchors.left: parent.left
               anchors.top: parent.top
               anchors.bottom: parent.bottom
-              width: parent.width * (count / weekCardRoot.maxCount)
+              width: parent.width * Math.min(1.0, Math.max(0.0, count / weekCardRoot.maxCount))
               color: root.alpha(foreground, 0.78)
               radius: 2
               Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
@@ -1426,13 +1727,13 @@ BarWidget {
 
           Text {
             textFormat: Text.PlainText
-            text: count + " prompts"
+            text: root.isTokenMode ? (root.formatTokens(count) + " tokens") : (Math.round(count) + " prompts")
             color: foreground
             font.family: fontFamily
             font.pixelSize: 10
             font.bold: true
             horizontalAlignment: Text.AlignRight
-            Layout.preferredWidth: 62
+            Layout.preferredWidth: root.isTokenMode ? 76 : 62
           }
         }
       }
@@ -1638,10 +1939,25 @@ BarWidget {
                 Text { textFormat: Text.PlainText; text: "·"; color: root.dim; font.pixelSize: 9 }
                 Text {
                   textFormat: Text.PlainText
-                  text: modelData.stepCount + " steps"
+                  text: {
+                    if (root.isTokenMode) {
+                      var tok = Number(modelData.tokens || 0)
+                      var inTok = Number(modelData.inputTokens || 0)
+                      var outTok = Number(modelData.outputTokens || 0)
+                      if (tok > 0) {
+                        return root.formatTokens(tok) + " tokens · In " + root.formatTokens(inTok) + " · Out " + root.formatTokens(outTok)
+                      }
+                      return "0 tokens"
+                    }
+                    var p = Number(modelData.promptCount || 0)
+                    var s = Number(modelData.stepCount || 0)
+                    return (p > 0 ? (p + " prompts · ") : "") + s + " steps"
+                  }
                   color: root.dim
                   font.family: fontFamily
                   font.pixelSize: 9
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
                 }
               }
             }
@@ -1689,7 +2005,7 @@ BarWidget {
     Text {
       textFormat: Text.PlainText
       Layout.fillWidth: true
-      text: "j/k scroll · 1-5 resume · n new · r refresh · s settings · q/esc close"
+      text: "j/k scroll · t tokens/prompts · 1-5 resume · n new · r refresh · s settings · q/esc close"
       color: dim
       font.family: fontFamily
       font.pixelSize: 10
@@ -1709,6 +2025,31 @@ BarWidget {
       || (recentSessionsLimitField && recentSessionsLimitField.field && recentSessionsLimitField.field.activeFocus)
       || (terminalField && terminalField.activeFocus)
     )
+
+    SectionCard {
+      title: "Model Breakdown Metric"
+      subtitle: "Default metric displayed in Model Usage Breakdown (or press 't' in popup)"
+
+      ColumnLayout {
+        width: parent.width
+        spacing: 8
+
+        ButtonGroup {
+          foreground: root.foreground
+          accent: root.accent
+          fontFamily: root.fontFamily
+          fontSize: 10
+          options: [
+            { value: "prompts", label: "Prompts & Steps" },
+            { value: "tokens", label: "Tokens" }
+          ]
+          value: root.draftValue("usageMode", "prompts")
+          onChanged: function(v) {
+            root.setDraftValue("usageMode", v)
+          }
+        }
+      }
+    }
 
     SectionCard {
       title: "Refresh Interval"
@@ -1736,7 +2077,7 @@ BarWidget {
 
     SectionCard {
       title: "Bar Badge Mode"
-      subtitle: "Active Sessions: badge appears when active • Prompts: daily total • Off: icon only"
+      subtitle: "Active Sessions: badge appears when active • Prompts / Tokens: daily total • Off: icon only"
 
       ColumnLayout {
         width: parent.width
@@ -1751,6 +2092,7 @@ BarWidget {
           options: [
             { value: "active", label: "Active Sessions", tooltip: "Show badge count when Antigravity sessions are active" },
             { value: "prompts", label: "Today's Prompts", tooltip: "Show total prompt count for today" },
+            { value: "tokens", label: "Today's Tokens", tooltip: "Show total token usage for today" },
             { value: "off", label: "Off", tooltip: "Hide badge entirely" }
           ]
           value: root.draftValue("badgeMode", root.draftValue("showBadge", true) === false ? "off" : "active")

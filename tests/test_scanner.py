@@ -216,6 +216,11 @@ class TestAntigravityScanner(unittest.TestCase):
             self.assertEqual(data["id"], "antigravity")
             self.assertIn("activeStatus", data)
             self.assertIn("todayPrompts", data)
+            self.assertIn("todayTotalTokens", data)
+            self.assertIn("weekTotalTokens", data)
+            self.assertIn("totalTokens", data)
+            self.assertIn("tokenGroups", data)
+            self.assertIsInstance(data["tokenGroups"], list)
             self.assertIn("recentSessions", data)
             self.assertIsInstance(data["recentSessions"], list)
             self.assertIn("limits", data)
@@ -226,11 +231,12 @@ class TestAntigravityScanner(unittest.TestCase):
             self.assertIn("burnRatePerHour", data["limits"][0])
             self.assertIn("forecastText", data["limits"][0])
             self.assertIn("forecastStatus", data["limits"][0])
-            # Verify recentDays entries include 'steps' field
+            # Verify recentDays entries include 'steps' and 'tokens' fields
             self.assertIn("recentDays", data)
             self.assertTrue(len(data["recentDays"]) > 0)
             for day_entry in data["recentDays"]:
                 self.assertIn("steps", day_entry)
+                self.assertIn("tokens", day_entry)
             self.assertIn("quotaUpdatedAt", data)
             self.assertIn("lastFullRefreshMs", data)
             self.assertTrue(data["lastFullRefreshMs"] > 0)
@@ -314,6 +320,100 @@ class TestAntigravityScanner(unittest.TestCase):
 
                 # Exactly ONE notification must be sent across all concurrent threads
                 self.assertEqual(mock_run.call_count, 1)
+
+    def test_token_usage_parsing(self):
+        import json
+        from datetime import datetime, timedelta
+        from antigravity_usage_scanner import parse_transcripts
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            brain_dir = Path(tmpdir) / "brain"
+            sess_dir = brain_dir / "session-1" / ".system_generated" / "logs"
+            sess_dir.mkdir(parents=True)
+
+            now = datetime.now().astimezone()
+            today_str = now.strftime("%Y-%m-%d")
+            three_days_ago = now - timedelta(days=3)
+            ten_days_ago = now - timedelta(days=10)
+            last_7_days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+
+            steps = [
+                {
+                    "step_index": 0,
+                    "type": "GENERIC",
+                    "created_at": now.isoformat(),
+                    "content": "Changed `Model Selection` from `Default` to `Gemini 4 Argon (High)`. No need to acknowledge.",
+                },
+                {
+                    "step_index": 1,
+                    "type": "USER_INPUT",
+                    "created_at": now.isoformat(),
+                    "content": "Hello today",
+                },
+                {
+                    "step_index": 2,
+                    "type": "PLANNER_RESPONSE",
+                    "created_at": now.isoformat(),
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "cache_read_tokens": 5000,
+                },
+                {
+                    "step_index": 3,
+                    "type": "PLANNER_RESPONSE",
+                    "created_at": three_days_ago.isoformat(),
+                    "input_tokens": 800,
+                    "output_tokens": 200,
+                    "cache_read_tokens": 1000,
+                },
+                {
+                    "step_index": 4,
+                    "type": "GENERIC",
+                    "created_at": ten_days_ago.isoformat(),
+                    "content": "Changed `Model Selection` from `Gemini 4 Argon (High)` to `Claude Sonnet 4.6 (Thinking)`. No need to acknowledge.",
+                },
+                {
+                    "step_index": 5,
+                    "type": "PLANNER_RESPONSE",
+                    "created_at": ten_days_ago.isoformat(),
+                    "input_tokens": 400,
+                    "output_tokens": 100,
+                    "cache_read_tokens": 500,
+                },
+            ]
+            tfile = sess_dir / "transcript.jsonl"
+            with open(tfile, "w", encoding="utf-8") as f:
+                for s in steps:
+                    f.write(json.dumps(s) + "\n")
+
+            session_stats = {}
+            daily_stats = {
+                d: {"tokens": 0, "inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0, "steps": 0, "prompts": 0}
+                for d in last_7_days
+            }
+            _, models_stats, model_list, _ = parse_transcripts(
+                brain_dir, today_str, last_7_days, session_stats=session_stats, daily_stats=daily_stats
+            )
+            by_name = {m["name"]: m for m in model_list}
+
+            m_today = by_name["Gemini 4 Argon (High)"]
+            self.assertEqual(m_today["todayTokens"], 6500)
+            self.assertEqual(m_today["todayInputTokens"], 1200)
+            self.assertEqual(m_today["todayOutputTokens"], 300)
+            self.assertEqual(m_today["todayCacheReadTokens"], 5000)
+            self.assertEqual(m_today["weekTokens"], 8500)
+            self.assertEqual(m_today["totalTokens"], 8500)
+
+            m_old = by_name["Claude Sonnet 4.6 (Thinking)"]
+            self.assertEqual(m_old["todayTokens"], 0)
+            self.assertEqual(m_old["weekTokens"], 0)
+            self.assertEqual(m_old["totalTokens"], 1000)
+
+            self.assertEqual(daily_stats[today_str]["tokens"], 6500)
+            self.assertIn("session-1", session_stats)
+            self.assertEqual(session_stats["session-1"]["tokens"], 9500)
+            self.assertEqual(session_stats["session-1"]["prompts"], 1)
+            self.assertEqual(session_stats["session-1"]["steps"], 6)
 
 
 if __name__ == "__main__":

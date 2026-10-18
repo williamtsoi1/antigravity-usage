@@ -27,8 +27,21 @@ Item {
     property int todayPrompts: 0
     property int todaySessions: 0
     property int todaySteps: 0
-    property int todayTotalTokens: 0
+    property double todayTotalTokens: 0
+    property double todayInputTokens: 0
+    property double todayOutputTokens: 0
+    property double todayCacheReadTokens: 0
     property var todayTokensByModel: ({})
+
+    property double weekTotalTokens: 0
+    property double weekInputTokens: 0
+    property double weekOutputTokens: 0
+    property double weekCacheReadTokens: 0
+
+    property double totalTokens: 0
+    property double totalInputTokens: 0
+    property double totalOutputTokens: 0
+    property double totalCacheReadTokens: 0
 
     property var recentDays: []
     property int totalPrompts: 0
@@ -41,6 +54,7 @@ Item {
     property var modelUsage: ({})
     property var limits: []
     property var quotaGroups: []
+    property var tokenGroups: []
     property var modelList: []
     property var recentWorkspaces: []
 
@@ -116,7 +130,20 @@ Item {
             root.todaySessions = Math.max(0, Number(data.todaySessions || 0))
             root.todaySteps = Math.max(0, Number(data.todaySteps || 0))
             root.todayTotalTokens = Math.max(0, Number(data.todayTotalTokens || 0))
+            root.todayInputTokens = Math.max(0, Number(data.todayInputTokens || 0))
+            root.todayOutputTokens = Math.max(0, Number(data.todayOutputTokens || 0))
+            root.todayCacheReadTokens = Math.max(0, Number(data.todayCacheReadTokens || 0))
             root.todayTokensByModel = data.todayTokensByModel || ({})
+
+            root.weekTotalTokens = Math.max(0, Number(data.weekTotalTokens || 0))
+            root.weekInputTokens = Math.max(0, Number(data.weekInputTokens || 0))
+            root.weekOutputTokens = Math.max(0, Number(data.weekOutputTokens || 0))
+            root.weekCacheReadTokens = Math.max(0, Number(data.weekCacheReadTokens || 0))
+
+            root.totalTokens = Math.max(0, Number(data.totalTokens || 0))
+            root.totalInputTokens = Math.max(0, Number(data.totalInputTokens || 0))
+            root.totalOutputTokens = Math.max(0, Number(data.totalOutputTokens || 0))
+            root.totalCacheReadTokens = Math.max(0, Number(data.totalCacheReadTokens || 0))
 
             root.recentDays = data.recentDays || []
             root.totalPrompts = Math.max(0, Number(data.totalPrompts || 0))
@@ -130,6 +157,7 @@ Item {
             root.modelList = data.modelList || []
             root.limits = data.limits || []
             root.quotaGroups = data.quotaGroups || []
+            root.tokenGroups = data.tokenGroups || []
             root.recentWorkspaces = data.recentWorkspaces || []
 
             root.usageStatusText = data.usageStatusText || ""

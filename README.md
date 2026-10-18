@@ -21,23 +21,25 @@ Antigravity active session monitor, prompt metrics, tool telemetry, interactive 
 - **Configurable Bar Badge Mode**: Dynamic badge pill with configurable display modes:
   - `active` (Default): Number of concurrent background sessions currently running (auto-hides when idle for a clean bar).
   - `prompts`: Total prompts executed today (auto-hides when 0).
+  - `tokens`: Total tokens consumed today formatted compactly (e.g. `2.63M`, auto-hides when 0).
   - `off`: Disables the badge completely for an ultra-minimal bar icon.
-- **Detailed Tooltip**: Hovering the bar widget shows active session status, today's prompt count, and current model.
+- **Detailed Tooltip**: Hovering the bar widget shows active session status, today's prompt or token count, and current model.
 
 ### 2. Interactive Session Management
 - **Quick Terminal Resume**: Click any session card or press `1`–`5` to immediately resume that session in your terminal (`agy --conversation <id>`).
 - **Terminal Emulator Override**: Configurable terminal command/binary override (e.g. `foot`, `ghostty`, `kitty`, `alacritty`, or custom command) with automatic working directory handoff, defaulting to `xdg-terminal-exec`.
 - **New Session Launcher**: Click the `` header button or press `n` to launch a brand-new `agy` session in your chosen terminal.
 - **Process Termination**: Hover over any running session and click the red `` button to terminate the session process cleanly (`SIGTERM`) and release its presence lock.
-- **Configurable Recent Sessions**: Choose your preferred default display limit (3 to 10 sessions) with one-click expansion to view all recent sessions, complete with styled workspace tags (` <ws>`), step counters, and relative timestamps.
+- **Configurable Recent Sessions**: Choose your preferred default display limit (3 to 10 sessions) with one-click expansion to view all recent sessions, complete with styled workspace tags (` <ws>`) and either prompt/step counters (`X prompts · Y steps`) or token usage (`X tokens · In … · Out …`).
 
-### 3. Model Usage Breakdown with Timeframe Toggle
-- **Timeframe Switcher**: Interactive segmented pill toggle in the top-right corner to switch between:
-  - **Today**: Prompt and step counts for the current calendar day.
+### 3. Top-Level Metric Toggle & Model Usage Breakdown
+- **Prompts & Steps vs. Tokens Toggle**: A segmented toggle at the top of the popup switches **"Today & Totals"**, **"Model Usage Breakdown"**, **"Last 7 Days Activity"**, and **"Recent Sessions"** between **Prompts & Steps** (`X prompts · Y steps`) and **Tokens** (`X tokens` with `In / Out / Cache` breakdown and range totals). Also toggleable via the `t` shortcut or in Settings.
+- **Timeframe Switcher**: Interactive segmented pill toggle in the Model Usage Breakdown header to switch between:
+  - **Today**: Prompt/step or token counts for the current calendar day.
   - **Last 7 Days**: Usage aggregated across the past week.
   - **All time**: All-time cumulative model usage.
-- **Dynamic Sorting & Animated Visuals**: Models automatically re-sort by activity in the selected timeframe, and progress bars smoothly animate (`Easing.OutCubic`) to reflect proportional usage share.
-- **Consistent Metrics**: Clean, uniform `X prompts · Y steps` formatting across all models and timeframes.
+- **Dynamic Sorting & Animated Visuals**: Models automatically re-sort by activity (prompts/steps or tokens) in the selected timeframe, and progress bars smoothly animate (`Easing.OutCubic`) to reflect proportional usage share.
+- **Consistent Metrics**: Clean, uniform formatting across all models and timeframes for both prompts/steps and token usage.
 
 ### 4. Quota Limits, Burn Rate & Desktop Alerts
 - **Real-Time Quota Buckets**: Live quota information fetched from `agy /usage` (Gemini Weekly & 5-Hour limits, Claude/GPT Weekly & 5-Hour limits).
@@ -51,8 +53,8 @@ Antigravity active session monitor, prompt metrics, tool telemetry, interactive 
 - **Dynamic Configured Model**: Automatically detects default model selection from `~/.gemini/antigravity-cli/settings.json`.
 - **Fast Inode PID Resolution**: O(1) advisory lock lookup via `/proc/locks` for instant session termination (`killSession`).
 - **Adaptive Polling**: Automatically scales refresh frequency from 60s idle down to 10s when an active session is working, then returns to 60s when idle.
-- **Today & Totals Summary**: Quick stats for prompts today, steps today, and cumulative total prompts.
-- **7-Day Activity Chart**: Daily prompt activity visualization across the past week.
+- **Today & Totals Summary**: Quick stats for prompts today / steps today / cumulative total prompts, or tokens today / 7-day tokens / total tokens (with Today `In · Out · Cache` breakdown).
+- **7-Day Activity Chart**: Daily prompt or token activity visualization across the past week.
 - **Tool Telemetry Breakdown**: Live call counters for tools (`run_command`, `write_to_file`, `replace_file_content`, `view_file`, `grep_search`, `find_by_name`, `subagents`, etc.).
 - **Smart Presence & Lock Pruning**: High-speed responses with automatic pruning of unheld presence locks older than 48 hours.
 
@@ -125,6 +127,7 @@ rm -f ~/.local/bin/omarchy-agent-usage-antigravity
 | Shortcut | Action |
 |---|---|
 | `1`–`5` | Quick-resume the corresponding recent session in terminal |
+| `t` | Toggle Model Usage Breakdown between Prompts & Steps and Tokens |
 | `n` | Launch a new `agy` terminal session |
 | `r` | Force refresh telemetry and quota limits |
 | `s` | Toggle between Stats and Settings view (or save settings) |
@@ -140,6 +143,7 @@ The widget registers an IPC target (`jesseburlamaque.antigravity-usage`), allowi
 | Toggle popup | `omarchy-shell shell toggle jesseburlamaque.antigravity-usage` |
 | Open popup | `omarchy-shell shell summon jesseburlamaque.antigravity-usage` |
 | Close popup | `omarchy-shell shell hide jesseburlamaque.antigravity-usage` |
+| Toggle Prompts/Tokens | `omarchy-shell ipc call jesseburlamaque.antigravity-usage toggleMode` |
 | Refresh telemetry | `omarchy-shell ipc call jesseburlamaque.antigravity-usage refresh` |
 | Open settings | `omarchy-shell ipc call jesseburlamaque.antigravity-usage settings` |
 
@@ -151,8 +155,9 @@ Configuration lives in `~/.config/omarchy/shell.json` or can be adjusted directl
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `usageMode` | enum (`prompts`, `tokens`) | `"prompts"` | Default metric displayed across popup sections (`prompts` & steps or `tokens`) |
 | `refreshIntervalSec` | integer (10–1800) | `60` | Telemetry refresh rate in seconds (adaptively scales to 10s when active) |
-| `badgeMode` | enum (`active`, `prompts`, `off`) | `"active"` | Bar badge display mode (`active` sessions count, today's `prompts`, or disabled `off`) |
+| `badgeMode` | enum (`active`, `prompts`, `tokens`, `off`) | `"active"` | Bar badge display mode (`active` sessions count, today's `prompts`, today's `tokens`, or disabled `off`) |
 | `enableQuotaAlerts` | boolean | `true` | Send desktop notifications when model quota falls below threshold |
 | `quotaAlertThreshold` | integer (5–50) | `15` | Low quota percentage alert threshold |
 | `terminalCommand` | string | `""` | Terminal emulator command override (`foot`, `ghostty`, `kitty`, `alacritty`, or blank for `xdg-terminal-exec`) |

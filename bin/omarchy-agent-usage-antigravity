@@ -36,7 +36,7 @@ def collect(base_dir: Path, force: bool = False) -> dict:
     # Compute active days & active dates for Omarchy panel contract
     all_dates = set()
     for d in data.get("recentDays", []):
-        if d.get("prompts", 0) > 0 or d.get("messageCount", 0) > 0:
+        if d.get("prompts", 0) > 0 or d.get("messageCount", 0) > 0 or d.get("tokens", 0) > 0:
             all_dates.add(d.get("date"))
 
     return {
@@ -49,13 +49,25 @@ def collect(base_dir: Path, force: bool = False) -> dict:
         "todayPrompts": data.get("todayPrompts", 0),
         "todaySessions": data.get("todaySessions", 0),
         "todayTotalTokens": data.get("todayTotalTokens", 0),
+        "todayInputTokens": data.get("todayInputTokens", 0),
+        "todayOutputTokens": data.get("todayOutputTokens", 0),
+        "todayCacheReadTokens": data.get("todayCacheReadTokens", 0),
         "todayTokensByModel": data.get("todayTokensByModel", {}),
+        "weekTotalTokens": data.get("weekTotalTokens", 0),
+        "weekInputTokens": data.get("weekInputTokens", 0),
+        "weekOutputTokens": data.get("weekOutputTokens", 0),
+        "weekCacheReadTokens": data.get("weekCacheReadTokens", 0),
+        "totalTokens": data.get("totalTokens", 0),
+        "totalInputTokens": data.get("totalInputTokens", 0),
+        "totalOutputTokens": data.get("totalOutputTokens", 0),
+        "totalCacheReadTokens": data.get("totalCacheReadTokens", 0),
         "recentDays": data.get("recentDays", []),
         "totalPrompts": data.get("totalPrompts", 0),
         "totalSessions": data.get("totalSessions", 0),
         "activeDays": len(all_dates),
         "activeDates": sorted(list(all_dates)),
         "modelUsage": data.get("modelUsage", {}),
+        "tokenGroups": data.get("tokenGroups", []),
         "limits": data.get("limits", []),
         "tierLabel": data.get("tierLabel", "Google DeepMind"),
         "usageStatusText": data.get("usageStatusText", ""),

@@ -125,17 +125,41 @@ def empty_result(base_dir: Path | None = None) -> dict[str, Any]:
         "todaySessions": 0,
         "todaySteps": 0,
         "todayTotalTokens": 0,
+        "todayInputTokens": 0,
+        "todayOutputTokens": 0,
+        "todayCacheReadTokens": 0,
         "todayTokensByModel": {},
-        "recentDays": [{"date": day, "messageCount": 0, "prompts": 0, "steps": 0} for day in recent_dates],
+        "weekTotalTokens": 0,
+        "weekInputTokens": 0,
+        "weekOutputTokens": 0,
+        "weekCacheReadTokens": 0,
+        "recentDays": [
+            {
+                "date": day,
+                "messageCount": 0,
+                "prompts": 0,
+                "steps": 0,
+                "tokens": 0,
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "cacheReadTokens": 0
+            }
+            for day in recent_dates
+        ],
         "totalPrompts": 0,
         "totalSessions": 0,
         "totalSteps": 0,
+        "totalTokens": 0,
+        "totalInputTokens": 0,
+        "totalOutputTokens": 0,
+        "totalCacheReadTokens": 0,
         "activeSessions": [],
         "recentSessions": [],
         "toolUsage": {},
         "modelUsage": {},
         "modelList": [],
         "quotaGroups": [],
+        "tokenGroups": [],
         "limits": [],
         "recentWorkspaces": [],
         "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -370,11 +394,25 @@ def parse_transcripts(
     today_str: str = "",
     recent_dates: list[str] | None = None,
     default_model: str = "Gemini 3.8 Flash (High)",
-    base_dir: Path | None = None
+    base_dir: Path | None = None,
+    session_stats: dict[str, dict[str, int]] | None = None,
+    daily_stats: dict[str, dict[str, int]] | None = None,
 ) -> tuple[Counter, dict[str, dict[str, Any]], list[dict[str, Any]], str]:
     tool_counter: Counter = Counter()
     models_stats: dict[str, dict[str, Any]] = {}
     latest_model = default_model
+
+    if daily_stats is not None and recent_dates:
+        for day in recent_dates:
+            if day not in daily_stats:
+                daily_stats[day] = {
+                    "tokens": 0,
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadTokens": 0,
+                    "steps": 0,
+                    "prompts": 0,
+                }
 
     if not brain_dir.exists():
         return tool_counter, models_stats, [], latest_model
@@ -414,22 +452,34 @@ def parse_transcripts(
             cached_entry = cache.get(file_key)
             if (
                 cached_entry
+                and cached_entry.get("v") == 2
                 and cached_entry.get("mtime") == mtime
                 and cached_entry.get("size") == size
             ):
                 entry_tools = cached_entry.get("tools", {})
-                entry_model = cached_entry.get("model", default_model)
-                steps_by_date = cached_entry.get("steps_by_date", {})
-                prompts_by_date = cached_entry.get("prompts_by_date", {})
-                total_steps = cached_entry.get("total_steps", 0)
-                total_prompts = cached_entry.get("total_prompts", 0)
+                entry_latest_model = cached_entry.get("latest_model", default_model)
+                session_totals = cached_entry.get("session_totals", {
+                    "prompts": 0,
+                    "steps": 0,
+                    "tokens": 0,
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadTokens": 0,
+                })
+                records = cached_entry.get("records", [])
             else:
-                entry_tools = Counter()
-                entry_model = default_model
-                steps_by_date = Counter()
-                prompts_by_date = Counter()
-                total_steps = 0
-                total_prompts = 0
+                entry_tools_counter: Counter = Counter()
+                current_model = default_model
+                entry_latest_model = default_model
+                session_totals = {
+                    "prompts": 0,
+                    "steps": 0,
+                    "tokens": 0,
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadTokens": 0,
+                }
+                model_day_map: dict[tuple[str, str], dict[str, Any]] = {}
 
                 try:
                     with open(p, "r", encoding="utf-8", errors="replace") as f:
@@ -452,14 +502,47 @@ def parse_transcripts(
                                 if match:
                                     m = sanitize_plain_text(match.group(1).strip().replace("`", ""), 80)
                                     if m and len(m) < 60 and not m.lower().startswith("comment"):
-                                        entry_model = m
+                                        current_model = m
+                                        if entry_latest_model == default_model:
+                                            entry_latest_model = m
 
-                            total_steps += 1
-                            steps_by_date[step_day] += 1
+                            in_tok = max(0, int(step.get("input_tokens") or step.get("inputTokens") or 0))
+                            out_tok = max(0, int(step.get("output_tokens") or step.get("outputTokens") or 0))
+                            cache_read_tok = max(0, int(step.get("cache_read_tokens") or step.get("cacheReadInputTokens") or step.get("cacheReadTokens") or 0))
+                            cache_create_tok = max(0, int(step.get("cache_creation_tokens") or step.get("cacheCreationInputTokens") or 0))
+                            step_tok = in_tok + out_tok + cache_read_tok + cache_create_tok
+                            is_prompt = step.get("type") == "USER_INPUT"
 
-                            if step.get("type") == "USER_INPUT":
-                                total_prompts += 1
-                                prompts_by_date[step_day] += 1
+                            session_totals["steps"] += 1
+                            session_totals["tokens"] += step_tok
+                            session_totals["inputTokens"] += in_tok
+                            session_totals["outputTokens"] += out_tok
+                            session_totals["cacheReadTokens"] += cache_read_tok
+                            if is_prompt:
+                                session_totals["prompts"] += 1
+
+                            key = (current_model, step_day)
+                            if key not in model_day_map:
+                                model_day_map[key] = {
+                                    "model": current_model,
+                                    "day": step_day,
+                                    "steps": 0,
+                                    "prompts": 0,
+                                    "inputTokens": 0,
+                                    "outputTokens": 0,
+                                    "cacheReadTokens": 0,
+                                    "cacheCreationTokens": 0,
+                                    "tokens": 0,
+                                }
+                            rec = model_day_map[key]
+                            rec["steps"] += 1
+                            if is_prompt:
+                                rec["prompts"] += 1
+                            rec["inputTokens"] += in_tok
+                            rec["outputTokens"] += out_tok
+                            rec["cacheReadTokens"] += cache_read_tok
+                            rec["cacheCreationTokens"] += cache_create_tok
+                            rec["tokens"] += step_tok
 
                             # Tool call detection
                             for tc in step.get("tool_calls", []):
@@ -468,63 +551,114 @@ def parse_transcripts(
                                     fn_name = tc.get("function", {}).get("name") or tc.get("name") or ""
                                 fn_name = sanitize_plain_text(fn_name, 80)
                                 if fn_name:
-                                    entry_tools[fn_name] += 1
+                                    entry_tools_counter[fn_name] += 1
                 except Exception:
                     continue
 
+                entry_tools = dict(entry_tools_counter)
+                records = list(model_day_map.values())
                 cache[file_key] = {
+                    "v": 2,
                     "mtime": mtime,
                     "size": size,
-                    "model": entry_model,
-                    "tools": dict(entry_tools),
-                    "steps_by_date": dict(steps_by_date),
-                    "prompts_by_date": dict(prompts_by_date),
-                    "total_steps": total_steps,
-                    "total_prompts": total_prompts
+                    "latest_model": entry_latest_model,
+                    "tools": entry_tools,
+                    "session_totals": session_totals,
+                    "records": records,
                 }
                 cache_dirty = True
 
             # Track latest model from most recently modified file
-            if not found_latest_model and entry_model:
-                latest_model = entry_model
+            if not found_latest_model and entry_latest_model:
+                latest_model = entry_latest_model
                 found_latest_model = True
 
             # Aggregate tool counts
             for fn_name, cnt in entry_tools.items():
                 tool_counter[fn_name] += cnt
 
-            # Aggregate model stats
-            if entry_model not in models_stats:
-                models_stats[entry_model] = {
-                    "name": entry_model,
-                    "prompts": 0,
-                    "steps": 0,
-                    "todayPrompts": 0,
-                    "todaySteps": 0,
-                    "weekPrompts": 0,
-                    "weekSteps": 0,
-                    "sessions": set(),
-                    "todaySessions": set(),
-                    "weekSessions": set()
-                }
+            if session_stats is not None:
+                session_stats[conv_id] = dict(session_totals)
 
-            models_stats[entry_model]["steps"] += total_steps
-            today_s = steps_by_date.get(today_str, 0)
-            models_stats[entry_model]["todaySteps"] += today_s
-            week_s = sum(steps_by_date.get(d, 0) for d in recent_dates_set)
-            models_stats[entry_model]["weekSteps"] += week_s
+            # Aggregate model and daily stats from records
+            for rec in records:
+                m_name = rec.get("model") or default_model
+                step_day = rec.get("day") or ""
+                r_steps = int(rec.get("steps", 0))
+                r_prompts = int(rec.get("prompts", 0))
+                r_in = int(rec.get("inputTokens", 0))
+                r_out = int(rec.get("outputTokens", 0))
+                r_cache_read = int(rec.get("cacheReadTokens", 0))
+                r_cache_create = int(rec.get("cacheCreationTokens", 0))
+                r_tokens = int(rec.get("tokens", 0))
 
-            models_stats[entry_model]["prompts"] += total_prompts
-            today_p = prompts_by_date.get(today_str, 0)
-            models_stats[entry_model]["todayPrompts"] += today_p
-            week_p = sum(prompts_by_date.get(d, 0) for d in recent_dates_set)
-            models_stats[entry_model]["weekPrompts"] += week_p
+                is_today = (step_day == today_str) if today_str else False
+                is_week = (step_day in recent_dates_set) if recent_dates_set else False
 
-            models_stats[entry_model]["sessions"].add(conv_id)
-            if today_s > 0 or today_p > 0:
-                models_stats[entry_model]["todaySessions"].add(conv_id)
-            if week_s > 0 or week_p > 0:
-                models_stats[entry_model]["weekSessions"].add(conv_id)
+                if m_name not in models_stats:
+                    models_stats[m_name] = {
+                        "name": m_name,
+                        "prompts": 0,
+                        "steps": 0,
+                        "todayPrompts": 0,
+                        "todaySteps": 0,
+                        "weekPrompts": 0,
+                        "weekSteps": 0,
+                        "sessions": set(),
+                        "todaySessions": set(),
+                        "weekSessions": set(),
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "cacheReadTokens": 0,
+                        "cacheCreationTokens": 0,
+                        "totalTokens": 0,
+                        "todayInputTokens": 0,
+                        "todayOutputTokens": 0,
+                        "todayCacheReadTokens": 0,
+                        "todayTokens": 0,
+                        "weekInputTokens": 0,
+                        "weekOutputTokens": 0,
+                        "weekCacheReadTokens": 0,
+                        "weekTokens": 0,
+                    }
+
+                ms = models_stats[m_name]
+                ms["steps"] += r_steps
+                ms["prompts"] += r_prompts
+                ms["inputTokens"] += r_in
+                ms["outputTokens"] += r_out
+                ms["cacheReadTokens"] += r_cache_read
+                ms["cacheCreationTokens"] += r_cache_create
+                ms["totalTokens"] += r_tokens
+                ms["sessions"].add(conv_id)
+
+                if is_today:
+                    ms["todaySteps"] += r_steps
+                    ms["todayPrompts"] += r_prompts
+                    ms["todayInputTokens"] += r_in
+                    ms["todayOutputTokens"] += r_out
+                    ms["todayCacheReadTokens"] += r_cache_read
+                    ms["todayTokens"] += r_tokens
+                    if r_steps > 0 or r_prompts > 0 or r_tokens > 0:
+                        ms["todaySessions"].add(conv_id)
+
+                if is_week:
+                    ms["weekSteps"] += r_steps
+                    ms["weekPrompts"] += r_prompts
+                    ms["weekInputTokens"] += r_in
+                    ms["weekOutputTokens"] += r_out
+                    ms["weekCacheReadTokens"] += r_cache_read
+                    ms["weekTokens"] += r_tokens
+                    if r_steps > 0 or r_prompts > 0 or r_tokens > 0:
+                        ms["weekSessions"].add(conv_id)
+
+                if daily_stats is not None and step_day in daily_stats:
+                    daily_stats[step_day]["steps"] += r_steps
+                    daily_stats[step_day]["prompts"] += r_prompts
+                    daily_stats[step_day]["tokens"] += r_tokens
+                    daily_stats[step_day]["inputTokens"] += r_in
+                    daily_stats[step_day]["outputTokens"] += r_out
+                    daily_stats[step_day]["cacheReadTokens"] += r_cache_read
 
     except Exception:
         pass
@@ -544,13 +678,17 @@ def parse_transcripts(
     formatted_models: dict[str, dict[str, Any]] = {}
     model_list: list[dict[str, Any]] = []
     total_model_prompts = sum(d["prompts"] for d in models_stats.values()) or 1
+    total_model_tokens = sum(d["totalTokens"] for d in models_stats.values()) or 1
 
-    for m, data in sorted(models_stats.items(), key=lambda item: item[1]["prompts"] + item[1]["steps"], reverse=True):
+    for m, data in sorted(models_stats.items(), key=lambda item: (item[1]["totalTokens"], item[1]["prompts"] + item[1]["steps"]), reverse=True):
         clean_model_name = sanitize_plain_text(m, 80)
         p_count = data["prompts"]
         s_count = data["steps"]
+        tok_count = data["totalTokens"]
         share_frac = round(p_count / max(1, total_model_prompts), 4)
         share_pct = round(share_frac * 100, 1)
+        tok_share_frac = round(tok_count / max(1, total_model_tokens), 4)
+        tok_share_pct = round(tok_share_frac * 100, 1)
 
         m_lower = clean_model_name.lower()
         if "claude" in m_lower:
@@ -575,14 +713,108 @@ def parse_transcripts(
             "sessions": len(data["sessions"]),
             "shareFraction": share_frac,
             "sharePercent": share_pct,
+            "tokenShareFraction": tok_share_frac,
+            "tokenSharePercent": tok_share_pct,
             "color": m_color,
-            "inputTokens": 0,
-            "outputTokens": 0
+            "inputTokens": data.get("inputTokens", 0),
+            "outputTokens": data.get("outputTokens", 0),
+            "cacheReadTokens": data.get("cacheReadTokens", 0),
+            "cacheReadInputTokens": data.get("cacheReadTokens", 0),
+            "cacheCreationTokens": data.get("cacheCreationTokens", 0),
+            "cacheCreationInputTokens": data.get("cacheCreationTokens", 0),
+            "totalTokens": tok_count,
+            "todayInputTokens": data.get("todayInputTokens", 0),
+            "todayOutputTokens": data.get("todayOutputTokens", 0),
+            "todayCacheReadTokens": data.get("todayCacheReadTokens", 0),
+            "todayTokens": data.get("todayTokens", 0),
+            "weekInputTokens": data.get("weekInputTokens", 0),
+            "weekOutputTokens": data.get("weekOutputTokens", 0),
+            "weekCacheReadTokens": data.get("weekCacheReadTokens", 0),
+            "weekTokens": data.get("weekTokens", 0)
         }
         formatted_models[clean_model_name] = entry
         model_list.append(entry)
 
     return tool_counter, formatted_models, model_list, latest_model
+
+
+def build_token_groups(model_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate per-model token metrics into Gemini vs Claude/GPT provider groups."""
+    groups_map: dict[str, dict[str, Any]] = {
+        "gemini": {
+            "id": "gemini",
+            "name": "Gemini Models",
+            "description": "Token usage across Gemini Flash and Gemini Pro models",
+            "color": "#38BDF8",
+            "todayTokens": 0,
+            "todayInputTokens": 0,
+            "todayOutputTokens": 0,
+            "todayCacheReadTokens": 0,
+            "weekTokens": 0,
+            "weekInputTokens": 0,
+            "weekOutputTokens": 0,
+            "weekCacheReadTokens": 0,
+            "totalTokens": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "todayPrompts": 0,
+            "weekPrompts": 0,
+            "prompts": 0
+        },
+        "claude_gpt": {
+            "id": "claude_gpt",
+            "name": "Claude and GPT models",
+            "description": "Token usage across Claude Opus, Claude Sonnet, and GPT models",
+            "color": "#D97757",
+            "todayTokens": 0,
+            "todayInputTokens": 0,
+            "todayOutputTokens": 0,
+            "todayCacheReadTokens": 0,
+            "weekTokens": 0,
+            "weekInputTokens": 0,
+            "weekOutputTokens": 0,
+            "weekCacheReadTokens": 0,
+            "totalTokens": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "todayPrompts": 0,
+            "weekPrompts": 0,
+            "prompts": 0
+        }
+    }
+
+    for m in model_list:
+        m_name = (m.get("name") or "").lower()
+        key = "claude_gpt" if ("claude" in m_name or "gpt" in m_name) else "gemini"
+        g = groups_map[key]
+        g["todayTokens"] += m.get("todayTokens", 0)
+        g["todayInputTokens"] += m.get("todayInputTokens", 0)
+        g["todayOutputTokens"] += m.get("todayOutputTokens", 0)
+        g["todayCacheReadTokens"] += m.get("todayCacheReadTokens", 0)
+        g["weekTokens"] += m.get("weekTokens", 0)
+        g["weekInputTokens"] += m.get("weekInputTokens", 0)
+        g["weekOutputTokens"] += m.get("weekOutputTokens", 0)
+        g["weekCacheReadTokens"] += m.get("weekCacheReadTokens", 0)
+        g["totalTokens"] += m.get("totalTokens", 0)
+        g["inputTokens"] += m.get("inputTokens", 0)
+        g["outputTokens"] += m.get("outputTokens", 0)
+        g["cacheReadTokens"] += m.get("cacheReadTokens", 0)
+        g["todayPrompts"] += m.get("todayPrompts", 0)
+        g["weekPrompts"] += m.get("weekPrompts", 0)
+        g["prompts"] += m.get("prompts", 0)
+
+    total_today = sum(g["todayTokens"] for g in groups_map.values())
+    total_week = sum(g["weekTokens"] for g in groups_map.values())
+    total_all = sum(g["totalTokens"] for g in groups_map.values())
+
+    for g in groups_map.values():
+        g["todayShareFraction"] = round(g["todayTokens"] / max(1, total_today), 4) if total_today > 0 else 0.0
+        g["weekShareFraction"] = round(g["weekTokens"] / max(1, total_week), 4) if total_week > 0 else 0.0
+        g["totalShareFraction"] = round(g["totalTokens"] / max(1, total_all), 4) if total_all > 0 else 0.0
+
+    return [groups_map["gemini"], groups_map["claude_gpt"]]
 
 
 def format_hours_duration(hours: float) -> str:
@@ -784,7 +1016,10 @@ def bg_refresh_quota(base_dir: Path) -> None:
 def fetch_agy_usage_quota(base_dir: Path, force: bool = False) -> dict[str, Any]:
     """Fetch real-time quota information via `agy -p /usage --output-format json` with caching."""
     cache_path = base_dir / "cache" / "quota_usage_cache.json"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     agy_bin = shutil.which("agy") or str(Path.home() / ".local/bin/agy")
 
     # 1. Read from cache if not forcing refresh
@@ -1127,7 +1362,7 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
             if time.time() - mtime < 1.5:
                 with open(scan_cache_path, "r", encoding="utf-8") as f:
                     cached = json.load(f)
-                    if isinstance(cached, dict) and cached.get("ready"):
+                    if isinstance(cached, dict) and cached.get("ready") and "tokenGroups" in cached:
                         if alert_threshold is not None:
                             check_and_send_quota_notifications(base_dir, cached.get("quotaGroups", []), threshold_pct=alert_threshold)
                         return cached
@@ -1153,14 +1388,26 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
     # 2. Parse History JSONL
     daily_prompts, total_prompts_hist, recent_prompts, ws_counter = parse_history_file(history_path, recent_dates)
 
-    # 3. Parse Transcripts for Tool Calls, Models & Model List (cached & incremental)
+    # 3. Parse Transcripts for Tool Calls, Models, Token Usage & Model List (cached & incremental)
+    session_transcript_stats: dict[str, dict[str, int]] = {}
+    daily_transcript_stats: dict[str, dict[str, int]] = {
+        d: {"tokens": 0, "inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0, "steps": 0, "prompts": 0}
+        for d in recent_dates
+    }
     tool_counter, model_usage_dict, model_list, latest_model = parse_transcripts(
-        brain_dir, today_str, recent_dates, default_model=configured_model, base_dir=base_dir
+        brain_dir,
+        today_str,
+        recent_dates,
+        default_model=configured_model,
+        base_dir=base_dir,
+        session_stats=session_transcript_stats,
+        daily_stats=daily_transcript_stats,
     )
 
-    # 4. Fetch real quota data from agy CLI /usage
+    # 4. Fetch real quota data from agy CLI /usage & build token groups
     raw_quota = fetch_agy_usage_quota(base_dir, force=force)
     quota_groups = format_quota_groups(raw_quota, base_dir=base_dir)
+    token_groups = build_token_groups(model_list)
 
     if alert_threshold is not None:
         check_and_send_quota_notifications(base_dir, quota_groups, threshold_pct=alert_threshold)
@@ -1184,10 +1431,12 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
                 "lastPrompt": display,
                 "workspace": ws,
                 "timestamp": ts_sec,
+                "promptCount": 1,
                 "stepCount": 0,
                 "agentName": "Antigravity"
             }
         else:
+            conv_map[cid]["promptCount"] = conv_map[cid].get("promptCount", 0) + 1
             if display:
                 conv_map[cid]["lastPrompt"] = display
                 if not conv_map[cid].get("firstPrompt"):
@@ -1223,6 +1472,7 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
                         "lastPrompt": "Session",
                         "workspace": "",
                         "timestamp": mtime,
+                        "promptCount": 0,
                         "stepCount": step_count,
                         "agentName": "Antigravity"
                     }
@@ -1255,6 +1505,7 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
                             "lastPrompt": sanitize_plain_text(row["preview"] or "Session", 250),
                             "workspace": sanitize_plain_text(row["workspace_uris"] or "", 300),
                             "timestamp": 0,
+                            "promptCount": 0,
                             "stepCount": int(row["step_count"] or 0),
                             "agentName": sanitize_plain_text(row["agent_name"] or "Antigravity", 80)
                         }
@@ -1279,6 +1530,7 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
                 "workspace": "",
                 "timestamp": now_sec,
                 "mtime": now_sec,
+                "promptCount": 0,
                 "stepCount": 0,
                 "agentName": "Antigravity"
             }
@@ -1318,11 +1570,24 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
         if len(last_p) < 12 and len(first_p) > len(last_p):
             preview = first_p
 
+        sess_t = session_transcript_stats.get(cid, {})
+        prompt_count = max(item.get("promptCount", 0), sess_t.get("prompts", 0))
+        step_count = max(item.get("stepCount", 0), sess_t.get("steps", 0))
+        tok_count = sess_t.get("tokens", 0)
+        in_tok_count = sess_t.get("inputTokens", 0)
+        out_tok_count = sess_t.get("outputTokens", 0)
+        cache_tok_count = sess_t.get("cacheReadTokens", 0)
+
         s_item = {
             "conversationId": cid,
             "title": sanitize_plain_text(title, 150),
             "preview": sanitize_plain_text(preview, 250),
-            "stepCount": item.get("stepCount", 0),
+            "promptCount": prompt_count,
+            "stepCount": step_count,
+            "tokens": tok_count,
+            "inputTokens": in_tok_count,
+            "outputTokens": out_tok_count,
+            "cacheReadTokens": cache_tok_count,
             "lastModified": iso_mod,
             "date": date_str,
             "workspace": clean_ws,
@@ -1343,13 +1608,33 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
     else:
         active_status = "Idle"
 
-    # Step and Session counts from real activity
+    # Step, Session, and Token counts from real activity
     today_steps_from_models = sum(m.get("todaySteps", 0) for m in model_list)
     total_steps_from_models = sum(m.get("steps", 0) for m in model_list)
     today_db_steps = today_steps_from_models or sum(s["stepCount"] for s in all_sessions if s["date"] == today_str)
     total_db_steps = total_steps_from_models or sum(s["stepCount"] for s in all_sessions)
     today_db_sessions = len(set(s["conversationId"] for s in all_sessions if s["date"] == today_str)) or (1 if has_active_session else 0)
     total_db_sessions = len(all_sessions)
+
+    today_input_tokens = sum(m.get("todayInputTokens", 0) for m in model_list)
+    today_output_tokens = sum(m.get("todayOutputTokens", 0) for m in model_list)
+    today_cache_read_tokens = sum(m.get("todayCacheReadTokens", 0) for m in model_list)
+    today_total_tokens = sum(m.get("todayTokens", 0) for m in model_list)
+    today_tokens_by_model = {
+        m["name"]: m.get("todayTokens", 0)
+        for m in model_list
+        if m.get("todayTokens", 0) > 0
+    }
+
+    week_input_tokens = sum(m.get("weekInputTokens", 0) for m in model_list)
+    week_output_tokens = sum(m.get("weekOutputTokens", 0) for m in model_list)
+    week_cache_read_tokens = sum(m.get("weekCacheReadTokens", 0) for m in model_list)
+    week_total_tokens = sum(m.get("weekTokens", 0) for m in model_list)
+
+    total_input_tokens = sum(m.get("inputTokens", 0) for m in model_list)
+    total_output_tokens = sum(m.get("outputTokens", 0) for m in model_list)
+    total_cache_read_tokens = sum(m.get("cacheReadTokens", 0) for m in model_list)
+    total_tokens = sum(m.get("totalTokens", 0) for m in model_list)
 
     # 6. Build recent days breakdown
     recent_days_data = []
@@ -1361,13 +1646,18 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
         if d in recent_dates:
             daily_steps[d] = daily_steps.get(d, 0) + s.get("stepCount", 0)
     for day in recent_dates:
-        p_count = daily_prompts.get(day, 0)
+        d_stats = daily_transcript_stats.get(day, {})
+        p_count = daily_prompts.get(day, 0) or d_stats.get("prompts", 0)
         weekly_prompts += p_count
         recent_days_data.append({
             "date": day,
             "messageCount": p_count,
             "prompts": p_count,
-            "steps": daily_steps.get(day, 0)
+            "steps": d_stats.get("steps", 0) or daily_steps.get(day, 0),
+            "tokens": d_stats.get("tokens", 0),
+            "inputTokens": d_stats.get("inputTokens", 0),
+            "outputTokens": d_stats.get("outputTokens", 0),
+            "cacheReadTokens": d_stats.get("cacheReadTokens", 0)
         })
 
     # 7. Convert quota groups into legacy limits array for backward compatibility
@@ -1412,6 +1702,9 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
         except Exception:
             pass
 
+    today_prompts_val = daily_prompts.get(today_str, 0) or daily_transcript_stats.get(today_str, {}).get("prompts", 0)
+    total_prompts_val = total_prompts_hist or sum(m.get("prompts", 0) for m in model_list)
+
     result = {
         "schemaVersion": 1,
         "id": "antigravity",
@@ -1423,13 +1716,24 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
         "hasLocalStats": True,
         "tierLabel": "Google DeepMind",
         "currentModel": clean_latest_model,
-        "todayPrompts": daily_prompts.get(today_str, 0),
+        "todayPrompts": today_prompts_val,
         "todaySessions": today_db_sessions or (1 if has_active_session else 0),
         "todaySteps": today_db_steps,
-        "todayTotalTokens": 0,
-        "todayTokensByModel": {},
+        "todayTotalTokens": today_total_tokens,
+        "todayInputTokens": today_input_tokens,
+        "todayOutputTokens": today_output_tokens,
+        "todayCacheReadTokens": today_cache_read_tokens,
+        "todayTokensByModel": today_tokens_by_model,
+        "weekTotalTokens": week_total_tokens,
+        "weekInputTokens": week_input_tokens,
+        "weekOutputTokens": week_output_tokens,
+        "weekCacheReadTokens": week_cache_read_tokens,
+        "totalTokens": total_tokens,
+        "totalInputTokens": total_input_tokens,
+        "totalOutputTokens": total_output_tokens,
+        "totalCacheReadTokens": total_cache_read_tokens,
         "recentDays": recent_days_data,
-        "totalPrompts": total_prompts_hist,
+        "totalPrompts": total_prompts_val,
         "totalSessions": total_db_sessions,
         "totalSteps": total_db_steps,
         "activeSessions": active_sessions,
@@ -1438,6 +1742,7 @@ def scan(base_dir: Path, force: bool = False, alert_threshold: int | None = None
         "modelUsage": model_usage_dict,
         "modelList": model_list,
         "quotaGroups": quota_groups,
+        "tokenGroups": token_groups,
         "limits": limits,
         "recentWorkspaces": recent_workspaces,
         "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
